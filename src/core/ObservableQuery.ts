@@ -578,7 +578,52 @@ export class ObservableQuery<
       queryManager.startPollingQuery(this.options, queryId);
     }
 
-    const onError = (error: ApolloError) => {
+    queryManager.observeQuery<TData>(
+      queryId,
+      this.options,
+      this.observer,
+    ).catch(this.observer.error);
+  }
+
+  public readonly observer = {
+    next: (result: ApolloQueryResult<TData>) => {
+      if (this.lastError || this.isDifferentFromLastResult(result)) {
+        const { queryManager } = this;
+        const { query, variables, fetchPolicy } = this.options;
+        const { hasClientExports } = queryManager.transform(query);
+        const previousResult = this.updateLastResult(result);
+
+        // Before calling `next` on each observer, we need to first see if
+        // the query is using `@client @export` directives, and update
+        // any variables that might have changed. If `@export` variables have
+        // changed, `setVariables` is used to query the cache first, followed
+        // by the network if needed.
+        if (hasClientExports) {
+          queryManager.getLocalState().addExportedVariables(
+            query,
+            variables,
+          ).then((variables: TVariables) => {
+            const previousVariables = this.variables;
+            if (
+              !result.loading &&
+              previousResult &&
+              fetchPolicy !== 'cache-only' &&
+              !equal(previousVariables, variables)
+            ) {
+              this.setVariables(variables).then(updatedResult => {
+                iterateObserversSafely(this.observers, 'next', updatedResult);
+              });
+            } else {
+              this.variables = this.options.variables = variables;
+              iterateObserversSafely(this.observers, 'next', result);
+            }
+          });
+        } else {
+          iterateObserversSafely(this.observers, 'next', result);
+        }
+      }
+    },
+    error: (error: ApolloError) => {
       // Since we don't get the current result on errors, only the error, we
       // must mirror the updates that occur in QueryStore.markQueryError here
       this.updateLastResult({
@@ -588,50 +633,8 @@ export class ObservableQuery<
         loading: false,
       });
       iterateObserversSafely(this.observers, 'error', this.lastError = error);
-    };
-
-    const { hasClientExports } = queryManager.transform(this.options.query);
-
-    queryManager.observeQuery<TData>(queryId, this.options, {
-      next: (result: ApolloQueryResult<TData>) => {
-        if (this.lastError || this.isDifferentFromLastResult(result)) {
-          const previousResult = this.updateLastResult(result);
-
-          const { query, variables, fetchPolicy } = this.options;
-
-          // Before calling `next` on each observer, we need to first see if
-          // the query is using `@client @export` directives, and update
-          // any variables that might have changed. If `@export` variables have
-          // changed, `setVariables` is used to query the cache first, followed
-          // by the network if needed.
-          if (hasClientExports) {
-            queryManager.getLocalState().addExportedVariables(
-              query,
-              variables,
-            ).then((variables: TVariables) => {
-              const previousVariables = this.variables;
-              if (
-                !result.loading &&
-                previousResult &&
-                fetchPolicy !== 'cache-only' &&
-                !equal(previousVariables, variables)
-              ) {
-                this.setVariables(variables).then(updatedResult => {
-                  iterateObserversSafely(this.observers, 'next', updatedResult);
-                });
-              } else {
-                this.variables = this.options.variables = variables;
-                iterateObserversSafely(this.observers, 'next', result);
-              }
-            });
-          } else {
-            iterateObserversSafely(this.observers, 'next', result);
-          }
-        }
-      },
-      error: onError,
-    }).catch(onError);
-  }
+    },
+  };
 
   private tearDownQuery() {
     const { queryManager } = this;
